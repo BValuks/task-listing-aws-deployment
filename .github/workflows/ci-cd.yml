@@ -1,0 +1,115 @@
+name: CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  buildAndTest:
+    name: CI Pipeline
+    runs-on: ubuntu-latest
+
+    env:
+      NODE_ENV: test
+
+    services:
+      postgres:
+        image: postgres:alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: --health-cmd pg_isready --health-interval 10s --health-timeout 5s --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions/setup-node@v2
+
+      - name: Install Angular dependencies
+        run: npm ci
+
+      - name: Run Angular Tests
+        run: npm run test:coverage
+
+      - name: Install Express dependencies
+        run: npm --prefix ./server ci
+
+      - name: Run Linting
+        run: npm --prefix ./server run lint 
+
+      - name: Run Migration
+        run: npm --prefix ./server run migrate
+
+      - name: Run Express Tests
+        run: npm --prefix ./server run coverage
+
+  deploy:
+    name: CD Pipeline
+    runs-on: ubuntu-latest
+    needs: buildAndTest
+
+    defaults:
+      run:
+        working-directory: ./
+
+    steps:
+
+      - name: Check out code
+        uses: actions/checkout@v2
+        
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-2
+    
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Set commit SHA as a variable
+        id: set-commit-sha
+        run: echo "CI_COMMIT_SHA=${{ github.sha }}" >> $GITHUB_ENV
+    
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ env.CI_COMMIT_SHA }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+      
+      - name: Call a Bash Script to build Dockerrun file
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+          CI_COMMIT_SHA: ${{ env.CI_COMMIT_SHA }}
+        run: |
+          chmod +x aws/create_dockerrun.sh  
+          ./aws/create_dockerrun.sh          
+
+      - name: Copy Dockerrun file into S3 bucket
+        run: aws s3 cp Dockerrun.aws.json "s3://${{ vars.S3_DEPLOY_BUCKET }}"
+
+      - name: Deploy to Elastic Beanstalk
+        run: |
+          aws elasticbeanstalk create-application-version \
+          --application-name "${{ vars.ELASTIC_BEANSTALK_APP_NAME }}" \
+          --version-label "${{ env.CI_COMMIT_SHA }}" \
+          --source-bundle S3Bucket="${{ vars.S3_DEPLOY_BUCKET }}",S3Key="Dockerrun.aws.json" \
+          --no-auto-create-application
+
+      - name: Update Elastic Beanstalk
+        run: |
+          aws elasticbeanstalk update-environment \
+          --application-name "${{ vars.ELASTIC_BEANSTALK_APP_NAME }}" \
+          --environment-name "${{ vars.ELASTIC_BEANSTALK_ENV_NAME }}" \
+          --version-label "${{ env.CI_COMMIT_SHA }}"
