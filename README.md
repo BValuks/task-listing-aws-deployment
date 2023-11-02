@@ -34,7 +34,3 @@ This last script included the following stages:
 - Build and push a container image to Amazon ECR
 - Call a Bash script to build a DockerRun file and copy this to an S3 bucket
 - Deploy to Elastic Beanstalk and update the environment
-## Resources
-
-- [Viewing logs from Amazon EC2 instances in your Elastic Beanstalk environment](https://docs.aws.amazon.com/elasticbeanstalk/latest/dg/using-features.logging.html)
-
